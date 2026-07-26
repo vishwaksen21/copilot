@@ -140,28 +140,31 @@ class AudioCaptureService:
                     self.device_index = i
                     return i
 
-        # Platform-aware fallback
-        exclude_names = {"MacBook Pro Microphone", "MacBook Air Microphone"}
-
+        # Platform-aware fallback: prefer virtual/loopback devices
         for i, dev in enumerate(devices):
-            if dev["max_input_channels"] >= 1 and dev["name"] not in exclude_names:
+            if dev["max_input_channels"] >= 1:
                 dev_lower = dev["name"].lower()
                 if any(kw in dev_lower for kw in ["stereo mix", "what u hear", "loopback"]):
                     logger.info(f"Using loopback device: {dev['name']} (index={i})")
                     self.device_index = i
                     return i
 
-        # Last resort: multi-channel input
+        # Last resort: multi-channel input (likely virtual)
         for i, dev in enumerate(devices):
-            if dev["max_input_channels"] >= 2 and dev["name"] not in exclude_names:
+            if dev["max_input_channels"] >= 2:
                 logger.info(f"Using multi-channel input device: {dev['name']} (index={i})")
                 self.device_index = i
                 return i
 
-        # Absolute last resort: any input device
+        # Absolute last resort: ANY input device (user's mic)
+        # On macOS without BlackHole, this is the only option
         for i, dev in enumerate(devices):
-            if dev["max_input_channels"] > 0 and dev["name"] not in exclude_names:
-                logger.warning(f"Using default input device (user mic): {dev['name']} (index={i})")
+            if dev["max_input_channels"] > 0:
+                logger.warning(
+                    f"No virtual audio device found. Using built-in mic: {dev['name']}. "
+                    f"Note: This captures your voice, not the other person's. "
+                    f"{_get_platform_info()}"
+                )
                 self.device_index = i
                 return i
 

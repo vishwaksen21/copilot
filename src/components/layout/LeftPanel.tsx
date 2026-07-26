@@ -9,6 +9,7 @@ const CHAT_WS_BASE = 'ws://127.0.0.1:8000/ws/chat'
 export function LeftPanel() {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [input, setInput] = useState('')
+  const [chatConnected, setChatConnected] = useState(false)
   const chatWsRef = useRef<WebSocket | null>(null)
   const conversationIdRef = useRef(crypto.randomUUID())
 
@@ -19,37 +20,61 @@ export function LeftPanel() {
   } = useTranscriptStore()
   const { startRecording, stopRecording } = useTranscription()
 
-  // Connect chat WebSocket
+  // Connect chat WebSocket with reconnection
   useEffect(() => {
-    const ws = new WebSocket(`${CHAT_WS_BASE}/${conversationIdRef.current}`)
-    chatWsRef.current = ws
+    let ws: WebSocket | null = null
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+    let destroyed = false
 
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data)
-        if (data.type === 'token') {
-          appendChatStreamingToken(data.content)
-        } else if (data.type === 'done') {
-          const streaming = useTranscriptStore.getState().chatStreaming
-          if (streaming) {
-            addChatMessage({
-              id: crypto.randomUUID(),
-              role: 'assistant',
-              content: streaming,
-              timestamp: Date.now(),
-            })
+    const connect = () => {
+      if (destroyed) return
+      ws = new WebSocket(`${CHAT_WS_BASE}/${conversationIdRef.current}`)
+      chatWsRef.current = ws
+
+      ws.onopen = () => {
+        setChatConnected(true)
+      }
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data)
+          if (data.type === 'token') {
+            appendChatStreamingToken(data.content)
+          } else if (data.type === 'done') {
+            const streaming = useTranscriptStore.getState().chatStreaming
+            if (streaming) {
+              addChatMessage({
+                id: crypto.randomUUID(),
+                role: 'assistant',
+                content: streaming,
+                timestamp: Date.now(),
+              })
+            }
+            setChatStreaming('')
           }
-          setChatStreaming('')
+        } catch (err) {
+          console.error('Failed to parse chat WS message:', err)
         }
-      } catch (err) {
-        console.error('Failed to parse chat WS message:', err)
+      }
+
+      ws.onerror = () => console.error('Chat WebSocket error')
+
+      ws.onclose = () => {
+        chatWsRef.current = null
+        setChatConnected(false)
+        if (!destroyed) {
+          reconnectTimer = setTimeout(connect, 2000)
+        }
       }
     }
 
-    ws.onerror = () => console.error('Chat WebSocket error')
-    ws.onclose = () => {}
+    connect()
 
-    return () => { ws.close() }
+    return () => {
+      destroyed = true
+      if (reconnectTimer) clearTimeout(reconnectTimer)
+      if (ws && ws.readyState === WebSocket.OPEN) ws.close()
+    }
   }, [])
 
   useEffect(() => {
@@ -85,7 +110,13 @@ export function LeftPanel() {
 
       {/* Header */}
       <div className="flex items-center justify-between px-6 py-4 border-b border-white/5">
-        <h2 className="text-[15px] font-semibold text-white/90">AI Assistant</h2>
+        <div className="flex items-center gap-2.5">
+          <h2 className="text-[15px] font-semibold text-white/90">AI Assistant</h2>
+          <div className={`flex items-center gap-1 px-1.5 py-0.5 rounded-full ${chatConnected ? 'bg-success/10' : 'bg-white/5'}`}>
+            <div className={`w-1.5 h-1.5 rounded-full ${chatConnected ? 'bg-success' : 'bg-white/30'}`} />
+            <span className="text-[9px] text-white/40">{chatConnected ? 'Ready' : 'Connecting'}</span>
+          </div>
+        </div>
         {isRecording && (
           <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-red-500/10 border border-red-500/20">
             <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />

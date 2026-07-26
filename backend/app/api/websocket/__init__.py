@@ -120,6 +120,7 @@ async def transcription_websocket(websocket: WebSocket, session_id: str):
                             )
                         }))
                         continue
+                        continue
 
                     session.audio_capture = capture
 

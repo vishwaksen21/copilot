@@ -28,6 +28,7 @@ export default function CopilotPage() {
   const [currentPage, setCurrentPage] = useState(1)
   const [brightness, setBrightness] = useState(0.8)
   const [input, setInput] = useState('')
+  const [chatConnected, setChatConnected] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const chatWsRef = useRef<WebSocket | null>(null)
   const conversationIdRef = useRef(crypto.randomUUID())
@@ -39,37 +40,59 @@ export default function CopilotPage() {
   } = useTranscriptStore()
   const { startRecording, stopRecording } = useTranscription()
 
-  // Connect chat WebSocket
+  // Connect chat WebSocket with reconnection
   useEffect(() => {
-    const ws = new WebSocket(`${CHAT_WS_BASE}/${conversationIdRef.current}`)
-    chatWsRef.current = ws
+    let ws: WebSocket | null = null
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+    let destroyed = false
 
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data)
-        if (data.type === 'token') {
-          appendChatStreamingToken(data.content)
-        } else if (data.type === 'done') {
-          const streaming = useTranscriptStore.getState().chatStreaming
-          if (streaming) {
-            addChatMessage({
-              id: crypto.randomUUID(),
-              role: 'assistant',
-              content: streaming,
-              timestamp: Date.now(),
-            })
+    const connect = () => {
+      if (destroyed) return
+      ws = new WebSocket(`${CHAT_WS_BASE}/${conversationIdRef.current}`)
+      chatWsRef.current = ws
+
+      ws.onopen = () => setChatConnected(true)
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data)
+          if (data.type === 'token') {
+            appendChatStreamingToken(data.content)
+          } else if (data.type === 'done') {
+            const streaming = useTranscriptStore.getState().chatStreaming
+            if (streaming) {
+              addChatMessage({
+                id: crypto.randomUUID(),
+                role: 'assistant',
+                content: streaming,
+                timestamp: Date.now(),
+              })
+            }
+            setChatStreaming('')
           }
-          setChatStreaming('')
+        } catch (err) {
+          console.error('Failed to parse chat WS message:', err)
         }
-      } catch (err) {
-        console.error('Failed to parse chat WS message:', err)
+      }
+
+      ws.onerror = () => console.error('Chat WebSocket error')
+
+      ws.onclose = () => {
+        chatWsRef.current = null
+        setChatConnected(false)
+        if (!destroyed) {
+          reconnectTimer = setTimeout(connect, 2000)
+        }
       }
     }
 
-    ws.onerror = () => console.error('Chat WebSocket error')
-    ws.onclose = () => {}
+    connect()
 
-    return () => { ws.close() }
+    return () => {
+      destroyed = true
+      if (reconnectTimer) clearTimeout(reconnectTimer)
+      if (ws && ws.readyState === WebSocket.OPEN) ws.close()
+    }
   }, [])
 
   useEffect(() => {
@@ -126,7 +149,13 @@ export default function CopilotPage() {
             <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-primary/20 to-accent/20 flex items-center justify-center">
               <Sparkles className="w-4 h-4 text-primary" />
             </div>
-            <h2 className="text-sm font-semibold text-foreground/90">AI Assistant</h2>
+            <div className="flex items-center gap-2.5">
+              <h2 className="text-sm font-semibold text-foreground/90">AI Assistant</h2>
+              <div className={`flex items-center gap-1 px-1.5 py-0.5 rounded-full ${chatConnected ? 'bg-success/10' : 'bg-white/5'}`}>
+                <div className={`w-1.5 h-1.5 rounded-full ${chatConnected ? 'bg-success' : 'bg-white/30'}`} />
+                <span className="text-[9px] text-white/40">{chatConnected ? 'Ready' : 'Connecting'}</span>
+              </div>
+            </div>
             {isRecording && (
               <div className="ml-auto flex items-center gap-2 px-3 py-1 rounded-full bg-red-500/10 border border-red-500/20">
                 <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
