@@ -3,6 +3,8 @@ import numpy as np
 import threading
 import queue
 import logging
+import platform
+import sys
 from typing import Optional, Generator
 
 logger = logging.getLogger(__name__)
@@ -11,6 +13,22 @@ TARGET_SAMPLE_RATE = 16000
 TARGET_CHANNELS = 1
 CHUNK_SECONDS = 3
 CHUNK_SAMPLES = TARGET_SAMPLE_RATE * CHUNK_SECONDS
+
+
+def _get_platform_info() -> str:
+    """Return platform-specific audio device guidance."""
+    if sys.platform == "win32":
+        return (
+            "On Windows, install VB-Audio Cable (free) from https://vb-audio.com/Cable/ "
+            "and set it as your default playback device. Then set 'Stereo Mix' or "
+            "'CABLE Output' as the input device in this app's settings."
+        )
+    elif sys.platform == "darwin":
+        return (
+            "Install BlackHole: brew install blackhole-2ch "
+            "then create an Aggregate Device in Audio MIDI Setup."
+        )
+    return "Install a virtual audio loopback device for your platform."
 
 
 class AudioCaptureService:
@@ -32,7 +50,11 @@ class AudioCaptureService:
     def find_device(self) -> Optional[int]:
         """Find the input device matching device_name."""
         devices = sd.query_devices()
-        keywords = ["blackhole", "black hole", "virtual", "loopback"]
+        keywords = [
+            "blackhole", "black hole", "virtual", "loopback",
+            "cable", "vb-audio", "virtual cable", "stereo mix",
+            "wave link", "voicemeeter", "wave input",
+        ]
 
         # Try exact name match first
         if self.device_name:
@@ -51,14 +73,36 @@ class AudioCaptureService:
                     self.device_index = i
                     return i
 
-        # Fallback: any multi-channel input device (likely virtual)
+        # Platform-aware fallback: any multi-channel input device
+        # On macOS, exclude built-in mic; on Windows, prefer Stereo Mix or multi-channel
+        exclude_names = set()
+        if platform.system() == "Darwin":
+            exclude_names = {"MacBook Pro Microphone", "MacBook Air Microphone"}
+
         for i, dev in enumerate(devices):
-            if dev["max_input_channels"] >= 2 and dev["name"] != "MacBook Pro Microphone":
+            if dev["max_input_channels"] >= 1 and dev["name"] not in exclude_names:
+                dev_lower = dev["name"].lower()
+                # Prefer devices that look like they could be virtual/loopback
+                if any(kw in dev_lower for kw in ["stereo mix", "what u hear", "loopback"]):
+                    logger.info(f"Using loopback device: {dev['name']} (index={i})")
+                    self.device_index = i
+                    return i
+
+        # Last resort: any device with 2+ channels (likely virtual)
+        for i, dev in enumerate(devices):
+            if dev["max_input_channels"] >= 2 and dev["name"] not in exclude_names:
                 logger.info(f"Using multi-channel input device: {dev['name']} (index={i})")
                 self.device_index = i
                 return i
 
-        logger.warning("No virtual audio device found. Listing available input devices:")
+        # If still nothing, try ANY input device (user's mic as last resort)
+        for i, dev in enumerate(devices):
+            if dev["max_input_channels"] > 0 and dev["name"] not in exclude_names:
+                logger.warning(f"Using default input device (user mic): {dev['name']} (index={i})")
+                self.device_index = i
+                return i
+
+        logger.warning("No audio device found. Listing available input devices:")
         for i, dev in enumerate(devices):
             if dev["max_input_channels"] > 0:
                 logger.warning(f"  [{i}] {dev['name']} (channels={dev['max_input_channels']})")
@@ -80,8 +124,8 @@ class AudioCaptureService:
         if self.device_index is None:
             if self.find_device() is None:
                 logger.error(
-                    "Cannot start capture: no virtual audio device found. "
-                    "Install BlackHole: brew install blackhole-2ch"
+                    f"Cannot start capture: no audio device found. "
+                    f"{_get_platform_info()}"
                 )
                 return False
 

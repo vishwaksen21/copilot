@@ -9,7 +9,7 @@ import time
 
 from app.config import settings
 from app.services.speech.transcription_service import TranscriptionService
-from app.services.audio.capture_service import AudioCaptureService
+from app.services.audio.capture_service import AudioCaptureService, _get_platform_info
 from app.services.ai.gemini_service import GeminiService
 from app.services.ai.openrouter_service import OpenRouterService
 
@@ -116,9 +116,8 @@ async def transcription_websocket(websocket: WebSocket, session_id: str):
                         await websocket.send_text(json.dumps({
                             "type": "error",
                             "message": (
-                                "No virtual audio device found. "
-                                "Install BlackHole: brew install blackhole-2ch "
-                                "then create an Aggregate Device in Audio MIDI Setup."
+                                "No audio device found. "
+                                + _get_platform_info()
                             )
                         }))
                         continue
@@ -337,13 +336,21 @@ async def chat_websocket(websocket: WebSocket, conversation_id: str):
 
                 ai = await _get_ai_service()
                 if ai:
+                    answer_parts = []
                     async for token in ai.generate_answer(
-                        content, conversation_history, stream=True
+                        content, conversation_history, stream=True,
+                        append_question=False,
                     ):
+                        answer_parts.append(token)
                         await websocket.send_text(json.dumps({
                             "type": "token",
                             "content": token,
                         }))
+
+                    full_answer = "".join(answer_parts)
+
+                    # Store assistant response for multi-turn context
+                    conversation_history.append({"role": "assistant", "content": full_answer})
 
                     await websocket.send_text(json.dumps({
                         "type": "done",

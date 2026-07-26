@@ -138,7 +138,7 @@ export function LeftPanel() {
               onClick={() => setInput('')}
               className="w-7 h-7 rounded-full bg-primary flex items-center justify-center shrink-0 hover:bg-primary/80 transition-colors"
             >
-              <SendHorizonal className="w-3.5 h-3.5 text-white" />
+              <SendHorizontal className="w-3.5 h-3.5 text-white" />
             </button>
           )}
         </div>

@@ -3,6 +3,10 @@ import { useTranscriptStore } from '../stores/transcript-store'
 
 const WS_BASE = 'ws://127.0.0.1:8000/ws'
 
+// Module-level singleton: one WebSocket shared across all hook instances
+let sharedWs: WebSocket | null = null
+let sharedExpectingAnswer = false
+
 export function useTranscription() {
   const {
     isRecording,
@@ -14,20 +18,19 @@ export function useTranscription() {
     setAiAnswer,
     appendAiAnswerToken,
     setAudioLevel,
-    clearTranscript,
     setStatus,
   } = useTranscriptStore()
 
-  const wsRef = useRef<WebSocket | null>(null)
-  const expectingAnswer = useRef(false)
-
   const startRecording = useCallback(async () => {
+    // Don't start if already recording
+    if (sharedWs && sharedWs.readyState === WebSocket.OPEN) return
+
     try {
       const sessionId = crypto.randomUUID()
       setCurrentSessionId(sessionId)
 
       const ws = new WebSocket(`${WS_BASE}/transcription/${sessionId}`)
-      wsRef.current = ws
+      sharedWs = ws
 
       ws.onopen = () => {
         setRecording(true)
@@ -36,53 +39,54 @@ export function useTranscription() {
       }
 
       ws.onmessage = (event) => {
-        const data = JSON.parse(event.data)
+        try {
+          const data = JSON.parse(event.data)
 
-        switch (data.type) {
-          case 'status':
-            setStatus(data.message)
-            break
+          switch (data.type) {
+            case 'status':
+              setStatus(data.message)
+              break
 
-          case 'partial':
-            setPartialText(data.text)
-            break
+            case 'partial':
+              setPartialText(data.text)
+              break
 
-          case 'final':
-            addSegment({
-              id: crypto.randomUUID(),
-              speakerLabel: 'Interviewer',
-              content: data.text,
-              startTime: 0,
-              endTime: 0,
-              confidence: data.confidence || 0,
-              isFinal: true,
-            })
-            setPartialText('')
-            // Flag that we're now expecting AI answer tokens
-            expectingAnswer.current = true
-            break
+            case 'final':
+              addSegment({
+                id: crypto.randomUUID(),
+                speakerLabel: 'Interviewer',
+                content: data.text,
+                startTime: 0,
+                endTime: 0,
+                confidence: data.confidence || 0,
+                isFinal: true,
+              })
+              setPartialText('')
+              sharedExpectingAnswer = true
+              break
 
-          case 'ai_answer_token':
-            // On first token of new answer, clear previous answer
-            if (expectingAnswer.current) {
-              setAiAnswer('')
-              expectingAnswer.current = false
-            }
-            appendAiAnswerToken(data.text)
-            break
+            case 'ai_answer_token':
+              if (sharedExpectingAnswer) {
+                setAiAnswer('')
+                sharedExpectingAnswer = false
+              }
+              appendAiAnswerToken(data.text)
+              break
 
-          case 'ai_answer':
-            // Final complete AI answer (already built up by tokens)
-            break
+            case 'ai_answer':
+              break
 
-          case 'audio_level':
-            setAudioLevel(data.level || 0)
-            break
+            case 'audio_level':
+              setAudioLevel(data.level || 0)
+              break
 
-          case 'error':
-            setStatus(`Error: ${data.message}`)
-            console.error('Server error:', data.message)
-            break
+            case 'error':
+              setStatus(`Error: ${data.message}`)
+              console.error('Server error:', data.message)
+              break
+          }
+        } catch (err) {
+          console.error('Failed to parse WS message:', err)
         }
       }
 
@@ -92,6 +96,7 @@ export function useTranscription() {
       }
 
       ws.onclose = () => {
+        sharedWs = null
         setRecording(false)
         setStatus('Disconnected')
       }
@@ -102,17 +107,25 @@ export function useTranscription() {
   }, [setCurrentSessionId, addSegment, setPartialText, setAiAnswer, appendAiAnswerToken, setAudioLevel, setRecording, setStatus])
 
   const stopRecording = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'stop' }))
-      wsRef.current.close()
+    if (sharedWs?.readyState === WebSocket.OPEN) {
+      sharedWs.send(JSON.stringify({ type: 'stop' }))
+      sharedWs.close()
     }
+    sharedWs = null
     setRecording(false)
     setStatus('Stopped')
   }, [setRecording, setStatus])
 
+  // Cleanup on unmount — only stop if this is the last component using the hook
   useEffect(() => {
     return () => {
-      stopRecording()
+      // Only close if no other component will use it
+      // Since all instances share sharedWs, the last unmount cleans up
+      if (sharedWs?.readyState === WebSocket.OPEN) {
+        sharedWs.send(JSON.stringify({ type: 'stop' }))
+        sharedWs.close()
+      }
+      sharedWs = null
     }
   }, [])
 

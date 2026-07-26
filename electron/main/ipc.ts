@@ -18,57 +18,69 @@ const PILL_HEIGHT = 56
 const PANEL_WIDTH = 380
 const PANEL_HEIGHT = 500
 
+// Mutable references — updated when windows are recreated on macOS activate
+let _mainWindow: BrowserWindow | null = null
+let _overlayWindow: BrowserWindow | null = null
+
+export function updateIpcWindows(main: BrowserWindow, overlay: BrowserWindow): void {
+  _mainWindow = main
+  _overlayWindow = overlay
+}
+
 export function registerIpcHandlers(
   mainWindow: BrowserWindow,
   overlayWindow: BrowserWindow
 ): void {
+  _mainWindow = mainWindow
+  _overlayWindow = overlayWindow
+  // All handlers reference _mainWindow/_overlayWindow so they survive window recreation
   // ============================================
   // WINDOW MANAGEMENT
   // ============================================
 
   ipcMain.handle(IPC_CHANNELS.WINDOW_MINIMIZE, () => {
-    mainWindow?.minimize()
+    _mainWindow?.minimize()
   })
 
   ipcMain.handle(IPC_CHANNELS.WINDOW_MAXIMIZE, () => {
-    if (mainWindow?.isMaximized()) {
-      mainWindow.unmaximize()
+    if (_mainWindow?.isMaximized()) {
+      _mainWindow.unmaximize()
     } else {
-      mainWindow?.maximize()
+      _mainWindow?.maximize()
     }
   })
 
   ipcMain.handle(IPC_CHANNELS.WINDOW_CLOSE, () => {
-    mainWindow?.close()
+    _mainWindow?.close()
   })
 
   ipcMain.handle(
     IPC_CHANNELS.WINDOW_SET_ALWAYS_ON_TOP,
     (_event, flag: boolean, level?: string) => {
-      overlayWindow?.setAlwaysOnTop(flag, (level as any) || 'floating', 1)
+      _overlayWindow?.setAlwaysOnTop(flag, (level as any) || 'floating', 1)
     }
   )
 
   ipcMain.handle(
     IPC_CHANNELS.WINDOW_SET_CONTENT_PROTECTION,
     (_event, enabled: boolean) => {
-      overlayWindow?.setContentProtection(enabled)
+      _overlayWindow?.setContentProtection(enabled)
     }
   )
 
   ipcMain.handle(
     IPC_CHANNELS.WINDOW_SET_IGNORE_MOUSE_EVENTS,
     (_event, ignore: boolean) => {
-      overlayWindow?.setIgnoreMouseEvents(ignore, { forward: true })
+      _overlayWindow?.setIgnoreMouseEvents(ignore, { forward: true })
     }
   )
 
   ipcMain.handle(IPC_CHANNELS.WINDOW_SHOW_OVERLAY, () => {
-    overlayWindow?.showInactive()
+    _overlayWindow?.showInactive()
   })
 
   ipcMain.handle(IPC_CHANNELS.WINDOW_HIDE_OVERLAY, () => {
-    overlayWindow?.hide()
+    _overlayWindow?.hide()
   })
 
   // ============================================
@@ -77,51 +89,43 @@ export function registerIpcHandlers(
 
   // Enter meeting mode: hide main window, show overlay pill
   ipcMain.handle('meeting:enter', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.hide()
-    }
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
+    enterStealthMode(_mainWindow, _overlayWindow)
+    if (_overlayWindow && !_overlayWindow.isDestroyed()) {
       const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize
-      overlayWindow.setSize(PILL_WIDTH, PILL_HEIGHT)
-      overlayWindow.setPosition(sw - PILL_WIDTH - 24, sh - PILL_HEIGHT - 24)
-      overlayWindow.showInactive()
-      overlayWindow.webContents.send('overlay:modeChange', 'pill')
+      _overlayWindow.setSize(PILL_WIDTH, PILL_HEIGHT)
+      _overlayWindow.setPosition(sw - PILL_WIDTH - 24, sh - PILL_HEIGHT - 24)
+      _overlayWindow.showInactive()
+      _overlayWindow.webContents.send('overlay:modeChange', 'pill')
     }
   })
 
   // Exit meeting mode: show main window, hide overlay
   ipcMain.handle('meeting:exit', () => {
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-      overlayWindow.hide()
-    }
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.show()
-      mainWindow.focus()
-    }
+    exitStealthMode(_mainWindow, _overlayWindow)
   })
 
   // Resize overlay between pill and panel
   ipcMain.handle('overlay:resize', (_event, mode: 'pill' | 'panel') => {
-    if (!overlayWindow || overlayWindow.isDestroyed()) return
-    const [x, y] = overlayWindow.getPosition()
+    if (!_overlayWindow || _overlayWindow.isDestroyed()) return
+    const [x, y] = _overlayWindow.getPosition()
     const { height: sh } = screen.getPrimaryDisplay().workAreaSize
     if (mode === 'panel') {
-      overlayWindow.setSize(PANEL_WIDTH, PANEL_HEIGHT)
+      _overlayWindow.setSize(PANEL_WIDTH, PANEL_HEIGHT)
       const newY = Math.min(y, sh - PANEL_HEIGHT - 8)
-      overlayWindow.setPosition(x, newY)
+      _overlayWindow.setPosition(x, newY)
     } else {
-      overlayWindow.setSize(PILL_WIDTH, PILL_HEIGHT)
+      _overlayWindow.setSize(PILL_WIDTH, PILL_HEIGHT)
     }
   })
 
   // Overlay click-through
   ipcMain.handle('overlay:clickThrough', (_event, enabled: boolean) => {
-    setOverlayClickThrough(overlayWindow, enabled)
+    setOverlayClickThrough(_overlayWindow, enabled)
   })
 
   // Overlay opacity
   ipcMain.handle('overlay:opacity', (_event, opacity: number) => {
-    setOverlayOpacity(overlayWindow, opacity)
+    setOverlayOpacity(_overlayWindow, opacity)
   })
 
   // ============================================
@@ -130,55 +134,54 @@ export function registerIpcHandlers(
 
   // Enter stealth mode
   ipcMain.handle('stealth:enter', () => {
-    enterStealthMode(overlayWindow)
-    overlayWindow?.showInactive()
-    // Notify all windows about stealth status change
-    mainWindow?.webContents.send('stealth:statusChanged', true)
-    overlayWindow?.webContents.send('stealth:statusChanged', true)
+    enterStealthMode(_mainWindow, _overlayWindow)
+    _overlayWindow?.showInactive()
+    _mainWindow?.webContents.send('stealth:statusChanged', true)
+    _overlayWindow?.webContents.send('stealth:statusChanged', true)
   })
 
   // Exit stealth mode
   ipcMain.handle('stealth:exit', () => {
-    exitStealthMode(overlayWindow)
-    mainWindow?.webContents.send('stealth:statusChanged', false)
-    overlayWindow?.webContents.send('stealth:statusChanged', false)
+    exitStealthMode(_mainWindow, _overlayWindow)
+    _mainWindow?.webContents.send('stealth:statusChanged', false)
+    _overlayWindow?.webContents.send('stealth:statusChanged', false)
   })
 
   // Emergency hide all windows
   ipcMain.handle('stealth:emergencyHide', () => {
-    emergencyHide(mainWindow, overlayWindow)
+    emergencyHide(_mainWindow, _overlayWindow)
   })
 
   // Show all windows
   ipcMain.handle('stealth:showAll', () => {
-    showAll(mainWindow, overlayWindow)
+    showAll(_mainWindow, _overlayWindow)
   })
 
   // Toggle click-through mode
   ipcMain.handle('stealth:clickThrough', (_event, enabled: boolean) => {
-    setOverlayClickThrough(overlayWindow, enabled)
+    setOverlayClickThrough(_overlayWindow, enabled)
   })
 
   // Set overlay opacity
   ipcMain.handle('stealth:opacity', (_event, opacity: number) => {
-    setOverlayOpacity(overlayWindow, opacity)
+    setOverlayOpacity(_overlayWindow, opacity)
   })
 
   // Get stealth status
   ipcMain.handle('stealth:getStatus', () => {
     return {
       stealthActive: getStealthMode(),
-      contentProtection: overlayWindow?.isContentProtected?.() ?? true,
-      opacity: overlayWindow?.getOpacity() ?? 1.0
+      contentProtection: _overlayWindow?.isContentProtected?.() ?? true,
+      opacity: _overlayWindow?.getOpacity() ?? 1.0
     }
   })
 
   // Enable/disable content protection
   ipcMain.handle('stealth:contentProtection', (_event, enabled: boolean) => {
-    overlayWindow?.setContentProtection(enabled)
+    _overlayWindow?.setContentProtection(enabled)
     // Also apply to main window in stealth mode
     if (getStealthMode()) {
-      mainWindow?.setContentProtection(enabled)
+      _mainWindow?.setContentProtection(enabled)
     }
   })
 
@@ -187,7 +190,7 @@ export function registerIpcHandlers(
   // ============================================
 
   ipcMain.handle(IPC_CHANNELS.FILE_OPEN_DIALOG, async (_event, options) => {
-    const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined
+    const parent = _mainWindow && !_mainWindow.isDestroyed() ? _mainWindow : undefined
     const result = await dialog.showOpenDialog(parent, {
       properties: ['openFile', 'multiSelections'],
       filters: [
@@ -201,7 +204,7 @@ export function registerIpcHandlers(
   })
 
   ipcMain.handle(IPC_CHANNELS.FILE_SAVE_DIALOG, async (_event, options) => {
-    const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined
+    const parent = _mainWindow && !_mainWindow.isDestroyed() ? _mainWindow : undefined
     const result = await dialog.showSaveDialog(parent, {
       filters: [
         { name: 'PDF', extensions: ['pdf'] },
@@ -215,6 +218,12 @@ export function registerIpcHandlers(
 
   ipcMain.handle(IPC_CHANNELS.FILE_READ, async (_event, filePath: string) => {
     const fs = require('fs/promises')
+    // Only allow reading from documents directory and app paths
+    const documentsPath = app.getPath('documents')
+    const resolved = require('path').resolve(filePath)
+    if (!resolved.startsWith(documentsPath) && !resolved.startsWith(app.getPath('userData'))) {
+      throw new Error('Access denied: path outside allowed directories')
+    }
     return await fs.readFile(filePath)
   })
 
@@ -222,6 +231,11 @@ export function registerIpcHandlers(
     IPC_CHANNELS.FILE_WRITE,
     async (_event, filePath: string, data: Buffer) => {
       const fs = require('fs/promises')
+      const documentsPath = app.getPath('documents')
+      const resolved = require('path').resolve(filePath)
+      if (!resolved.startsWith(documentsPath) && !resolved.startsWith(app.getPath('userData'))) {
+        throw new Error('Access denied: path outside allowed directories')
+      }
       await fs.writeFile(filePath, data)
     }
   )

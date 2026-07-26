@@ -35,8 +35,15 @@ class OpenRouterService:
         question: str,
         conversation_history: Optional[List[Dict[str, str]]] = None,
         stream: bool = True,
+        append_question: bool = True,
     ) -> AsyncGenerator[str, None]:
-        """Generate an interview answer for the given question."""
+        """Generate an interview answer for the given question.
+
+        Args:
+            append_question: If True, appends the question as a user message.
+                Set to False when the caller already includes the question in conversation_history
+                (e.g. the chat endpoint).
+        """
         if not self._available:
             yield "[AI not configured — add OPENROUTER_API_KEY to .env]"
             return
@@ -49,11 +56,12 @@ class OpenRouterService:
                 role = "user" if msg.get("role") in ("interviewer", "user") else "assistant"
                 messages.append({"role": role, "content": msg.get("content", "")})
 
-        # Add the current question
-        messages.append({
-            "role": "user",
-            "content": f"Interviewer just said: {question}",
-        })
+        # Add the current question only if caller hasn't already included it
+        if append_question:
+            messages.append({
+                "role": "user",
+                "content": f"Interviewer just said: {question}",
+            })
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",

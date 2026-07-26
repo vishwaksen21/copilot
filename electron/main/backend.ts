@@ -26,10 +26,11 @@ export async function startBackend(): Promise<ChildProcess | null> {
   let cwd: string
 
   if (isDev) {
-    command = 'python3'
+    command = process.platform === 'win32' ? 'python' : 'python3'
     args = ['-m', 'uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', String(BACKEND_PORT)]
     cwd = join(process.cwd(), 'backend')
   } else {
+    // In production, look for bundled backend executable
     const backendPath = join(
       process.resourcesPath,
       'backend',
@@ -51,11 +52,11 @@ export async function startBackend(): Promise<ChildProcess | null> {
   })
 
   proc.on('error', (error) => {
-    console.error('Backend process error:', error)
+    console.error('[Backend] Process error:', error.message)
   })
 
   proc.on('exit', (code) => {
-    console.log(`Backend process exited with code ${code}`)
+    console.log(`[Backend] Process exited with code ${code}`)
     backendProcess = null
   })
 
@@ -66,7 +67,6 @@ export async function startBackend(): Promise<ChildProcess | null> {
 export function stopBackend(proc: ChildProcess): void {
   if (proc && !proc.killed) {
     proc.kill('SIGTERM')
-    // Force kill after 5 seconds if graceful shutdown fails
     setTimeout(() => {
       if (proc && !proc.killed) {
         proc.kill('SIGKILL')
@@ -89,7 +89,7 @@ export async function waitForBackend(
     }
     await new Promise((resolve) => setTimeout(resolve, interval))
   }
-  throw new Error(`Backend failed to start after ${retries} retries`)
+  return false
 }
 
 function checkHealth(url: string): Promise<boolean> {

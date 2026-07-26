@@ -38,20 +38,24 @@ export default function OverlayWindow() {
     chatWsRef.current = ws
 
     ws.onmessage = (event) => {
-      const data = JSON.parse(event.data)
-      if (data.type === 'token') {
-        appendChatStreamingToken(data.content)
-      } else if (data.type === 'done') {
-        const streaming = useTranscriptStore.getState().chatStreaming
-        if (streaming) {
-          addChatMessage({
-            id: crypto.randomUUID(),
-            role: 'assistant',
-            content: streaming,
-            timestamp: Date.now(),
-          })
+      try {
+        const data = JSON.parse(event.data)
+        if (data.type === 'token') {
+          appendChatStreamingToken(data.content)
+        } else if (data.type === 'done') {
+          const streaming = useTranscriptStore.getState().chatStreaming
+          if (streaming) {
+            addChatMessage({
+              id: crypto.randomUUID(),
+              role: 'assistant',
+              content: streaming,
+              timestamp: Date.now(),
+            })
+          }
+          setChatStreaming('')
         }
-        setChatStreaming('')
+      } catch (err) {
+        console.error('Failed to parse chat WS message:', err)
       }
     }
 
@@ -69,14 +73,32 @@ export default function OverlayWindow() {
     })
   }, [])
 
-  // Auto-collapse back to pill after 12s of no new content
+  // Auto-collapse back to pill after 30s of no new content
   const scheduleAutoCollapse = useCallback(() => {
     if (collapseTimerRef.current) clearTimeout(collapseTimerRef.current)
     collapseTimerRef.current = setTimeout(() => {
+      // Don't collapse if user is actively typing (input is focused)
+      const activeEl = document.activeElement
+      const isTyping = activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')
+      if (isTyping) {
+        // Reschedule — user is still interacting
+        scheduleAutoCollapse()
+        return
+      }
       setMode('pill')
       window.electronAPI?.overlay?.resize('pill')
-    }, 12000)
+    }, 30000)
   }, [])
+
+  // Cancel auto-collapse when user is actively typing in the input
+  const onInputFocus = useCallback(() => {
+    if (collapseTimerRef.current) clearTimeout(collapseTimerRef.current)
+  }, [])
+
+  const onInputBlur = useCallback(() => {
+    // Restart auto-collapse after blur if in panel mode
+    if (mode === 'panel') scheduleAutoCollapse()
+  }, [mode, scheduleAutoCollapse])
 
   // When new AI answer arrives, expand automatically
   useEffect(() => {
@@ -345,6 +367,8 @@ export default function OverlayWindow() {
                       sendChatMessage()
                     }
                   }}
+                  onFocus={onInputFocus}
+                  onBlur={onInputBlur}
                   placeholder="Ask a question…"
                   className="flex-1 bg-transparent text-[12px] text-white/80 placeholder:text-white/25 outline-none"
                 />

@@ -23,7 +23,6 @@ export function createMainWindow(): BrowserWindow {
     frame: false,
     transparent: true,
     hasShadow: true,
-    skipTaskbar: false,
     backgroundColor: '#00000000',
     webPreferences: {
       contextIsolation: true,
@@ -62,7 +61,20 @@ export function createMainWindow(): BrowserWindow {
   })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
-    require('electron').shell.openExternal(details.url)
+    // Only allow safe external URLs
+    const url = details.url
+    const allowedProtocols = ['https:', 'http:']
+    const allowedHosts = ['github.com', 'opencode.ai', 'avelyn.app']
+    try {
+      const parsed = new URL(url)
+      if (allowedProtocols.includes(parsed.protocol) && allowedHosts.some(h => parsed.hostname.endsWith(h))) {
+        require('electron').shell.openExternal(url)
+      } else {
+        console.warn('[Window] Blocked openExternal:', url)
+      }
+    } catch {
+      console.warn('[Window] Invalid URL for openExternal:', url)
+    }
     return { action: 'deny' }
   })
 
@@ -111,11 +123,11 @@ export function createOverlayWindow(parent: BrowserWindow): BrowserWindow {
   })
 
   overlayWindow.setAlwaysOnTop(true, 'screen-saver', 1)
-  overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
   overlayWindow.setContentProtection(true)
 
   if (process.platform === 'darwin') {
     overlayWindow.setHiddenInMissionControl(true)
+    overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
   }
 
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
@@ -131,6 +143,15 @@ export function createOverlayWindow(parent: BrowserWindow): BrowserWindow {
     overlayWindow.hide()
   })
 
+  // On Windows, transparent frameless windows can disappear when they lose focus.
+  // Re-assert alwaysOnTop when the overlay loses focus so it stays visible.
+  overlayWindow.on('blur', () => {
+    if (overlayWindow.isDestroyed()) return
+    if (process.platform === 'win32') {
+      overlayWindow.setAlwaysOnTop(true, 'screen-saver', 1)
+    }
+  })
+
   return overlayWindow
 }
 
@@ -140,6 +161,9 @@ export function createOverlayWindow(parent: BrowserWindow): BrowserWindow {
  * - Cmd+Tab / Alt+Tab task switcher
  * - Mission Control / Task View
  * - Screen recording / screen share (content protection)
+ *
+ * IMPORTANT: Show overlay FIRST, then hide main window.
+ * On Windows, hiding all windows triggers app quit.
  */
 export function enterStealthMode(
   mainWindow: BrowserWindow | null,
@@ -147,25 +171,29 @@ export function enterStealthMode(
 ): void {
   stealthMode = true
 
-  // Hide from dock (macOS)
-  if (process.platform === 'darwin') {
-    app.dock.hide()
+  // Step 1: Show overlay FIRST (before hiding anything)
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    overlayWindow.setContentProtection(true)
+    overlayWindow.setAlwaysOnTop(true, 'screen-saver', 1)
+    overlayWindow.setSkipTaskbar(true)
+
+    if (process.platform === 'darwin') {
+      overlayWindow.setHiddenInMissionControl(true)
+      overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+    }
+
+    overlayWindow.showInactive()
   }
 
-  // Hide main window completely
+  // Step 2: NOW hide main window
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.hide()
     mainWindow.setSkipTaskbar(true)
   }
 
-  // Configure overlay for stealth
-  if (overlayWindow && !overlayWindow.isDestroyed()) {
-    overlayWindow.setContentProtection(true)
-    overlayWindow.setAlwaysOnTop(true, 'screen-saver', 1)
-    overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
-    overlayWindow.setSkipTaskbar(true)
-    overlayWindow.setHiddenInMissionControl(true)
-    overlayWindow.showInactive()
+  // Step 3: Hide from dock (macOS)
+  if (process.platform === 'darwin') {
+    app.dock.hide()
   }
 }
 

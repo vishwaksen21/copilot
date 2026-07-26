@@ -22,7 +22,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     setClickThrough: (enabled: boolean) => ipcRenderer.invoke('overlay:clickThrough', enabled),
     setOpacity: (opacity: number) => ipcRenderer.invoke('overlay:opacity', opacity),
     onModeChange: (callback: (mode: string) => void) => {
-      ipcRenderer.on('overlay:modeChange', (_event, mode) => callback(mode))
+      const handler = (_event: any, mode: string) => callback(mode)
+      ipcRenderer.on('overlay:modeChange', handler)
+      return () => ipcRenderer.removeListener('overlay:modeChange', handler)
     },
   },
 
@@ -63,10 +65,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Events from main process
   onBackendStatus: (callback: (status: string) => void) => {
-    ipcRenderer.on('backend:status', (_event, status) => callback(status))
+    const handler = (_event: any, status: string) => callback(status)
+    ipcRenderer.on('backend:status', handler)
+    return () => ipcRenderer.removeListener('backend:status', handler)
   },
   onTranscriptionToggle: (callback: () => void) => {
-    ipcRenderer.on('transcription:toggle', () => callback())
+    const handler = () => callback()
+    ipcRenderer.on('transcription:toggle', handler)
+    return () => ipcRenderer.removeListener('transcription:toggle', handler)
   },
 })
 
@@ -85,7 +91,7 @@ export interface ElectronAPI {
     resize: (mode: 'pill' | 'panel') => Promise<void>
     setClickThrough: (enabled: boolean) => Promise<void>
     setOpacity: (opacity: number) => Promise<void>
-    onModeChange: (callback: (mode: string) => void) => void
+    onModeChange: (callback: (mode: string) => void) => () => void
   }
   meeting: {
     start: () => Promise<void>
@@ -111,6 +117,6 @@ export interface ElectronAPI {
     get: (key: string) => Promise<any>
     set: (key: string, value: any) => Promise<void>
   }
-  onBackendStatus: (callback: (status: string) => void) => void
-  onTranscriptionToggle: (callback: () => void) => void
+  onBackendStatus: (callback: (status: string) => void) => () => void
+  onTranscriptionToggle: (callback: () => void) => () => void
 }

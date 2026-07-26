@@ -1,12 +1,13 @@
 import { useAppStore } from '../../stores/app-store'
 import { useTheme } from '../../hooks/useTheme'
+import { useTranscription } from '../../hooks/useTranscription'
 import {
   Sun,
   Moon,
   Monitor,
   Layers,
   Mic,
-  Camera,
+  MicOff,
   Keyboard,
   Search,
   Bell
@@ -15,12 +16,18 @@ import {
 export default function Header() {
   const { theme } = useAppStore()
   const { setTheme } = useTheme()
+  const { isRecording, startRecording, stopRecording } = useTranscription()
 
   const toggleTheme = () => {
     const themes = ['dark', 'light', 'system']
     const currentIndex = themes.indexOf(theme)
     const nextIndex = (currentIndex + 1) % themes.length
     setTheme(themes[nextIndex] as any)
+  }
+
+  const toggleRecording = () => {
+    if (isRecording) stopRecording()
+    else startRecording()
   }
 
   const ThemeIcon = theme === 'dark' ? Moon : theme === 'light' ? Sun : Monitor
@@ -40,21 +47,15 @@ export default function Header() {
 
       {/* Right: Actions */}
       <div className="flex items-center gap-1 no-drag">
-        {/* Quick actions */}
+        {/* Transcription toggle */}
         <button
-          onClick={() => window.electronAPI?.onTranscriptionToggle?.(() => {})}
-          className="p-2 rounded-lg hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
-          title="Toggle Transcription (⌘⇧T)"
+          onClick={toggleRecording}
+          className={`p-2 rounded-lg hover:bg-muted transition-colors ${
+            isRecording ? 'text-red-400 hover:text-red-300' : 'text-muted-foreground hover:text-foreground'
+          }`}
+          title={isRecording ? 'Stop Recording (⌘⇧T)' : 'Start Recording (⌘⇧T)'}
         >
-          <Mic className="w-4 h-4" />
-        </button>
-
-        <button
-          onClick={() => window.electronAPI?.onScreenshotCapture?.(() => {})}
-          className="p-2 rounded-lg hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
-          title="Screenshot + OCR (⌘⇧S)"
-        >
-          <Camera className="w-4 h-4" />
+          {isRecording ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
         </button>
 
         <button
@@ -83,8 +84,6 @@ export default function Header() {
           title="Notifications"
         >
           <Bell className="w-4 h-4" />
-          {/* Notification badge - shown when there are notifications */}
-          {/* <span className="absolute top-1 right-1 w-2 h-2 bg-primary rounded-full" /> */}
         </button>
       </div>
     </header>

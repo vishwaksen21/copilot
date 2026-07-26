@@ -6,10 +6,6 @@ directories:
   output: release
   buildResources: build
 
-files:
-  - out/**/*
-  - "!node_modules/**/*"
-
 extraResources:
   - from: "backend"
     to: "backend"

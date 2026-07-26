@@ -35,6 +35,7 @@ class GeminiService:
         question: str,
         conversation_history: Optional[List[Dict[str, str]]] = None,
         stream: bool = True,
+        append_question: bool = True,
     ) -> AsyncGenerator[str, None]:
         """Generate an interview answer for the given question."""
         if not self._available:
@@ -47,17 +48,18 @@ class GeminiService:
         # Add conversation history for context
         if conversation_history:
             for msg in conversation_history[-10:]:
-                role = "user" if msg.get("role") == "interviewer" else "model"
+                role = "user" if msg.get("role") in ("interviewer", "user") else "model"
                 contents.append(genai.types.Content(
                     role=role,
                     parts=[genai.types.Part.from_text(text=msg.get("content", ""))]
                 ))
 
-        # Add the current question
-        contents.append(genai.types.Content(
-            role="user",
-            parts=[genai.types.Part.from_text(text=f"Interviewer just said: {question}")]
-        ))
+        # Add the current question only if caller hasn't already included it
+        if append_question:
+            contents.append(genai.types.Content(
+                role="user",
+                parts=[genai.types.Part.from_text(text=f"Interviewer just said: {question}")]
+            ))
 
         try:
             if stream:

@@ -13,6 +13,10 @@ export function useBackend() {
       const response = await fetch(`${API_BASE}/health`, {
         signal: AbortSignal.timeout(5000)
       })
+      if (!response.ok) {
+        setBackendStatus('disconnected')
+        return
+      }
       const data = await response.json()
 
       if (data.status === 'healthy') {
