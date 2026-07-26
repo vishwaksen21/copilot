@@ -1,0 +1,45 @@
+appId: com.avelyn.app
+productName: Avelyn
+copyright: Copyright © 2025
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - out/**/*
+  - "!node_modules/**/*"
+
+extraResources:
+  - from: "backend"
+    to: "backend"
+
+mac:
+  category: public.app-category.productivity
+  icon: build/icon.icns
+  hardenedRuntime: true
+  target:
+    - dmg
+    - zip
+
+win:
+  icon: build/icon.ico
+  target:
+    - nsis
+  artifactName: "Avelyn-Setup-${version}.${ext}"
+
+nsis:
+  oneClick: true
+  perMachine: false
+  allowToChangeInstallationDirectory: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Avelyn
+  uninstallDisplayName: Avelyn
+
+linux:
+  icon: build/icon.png
+  target:
+    - AppImage
+    - deb
+  category: Utility
