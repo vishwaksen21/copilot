@@ -120,7 +120,6 @@ async def transcription_websocket(websocket: WebSocket, session_id: str):
                             )
                         }))
                         continue
-                        continue
 
                     session.audio_capture = capture
 
@@ -143,9 +142,7 @@ async def transcription_websocket(websocket: WebSocket, session_id: str):
                         transcription = _get_transcription()
 
                         # Run capture in a thread since sounddevice is blocking
-                        def audio_generator():
-                            return capture.chunks(settings.sample_rate)
-
+                        audio_chunks = capture.chunks(settings.sample_rate)
                         loop = asyncio.get_event_loop()
 
                         try:
@@ -153,7 +150,7 @@ async def transcription_websocket(websocket: WebSocket, session_id: str):
                                 # Get next audio chunk from the generator (runs in thread)
                                 try:
                                     chunk = await loop.run_in_executor(
-                                        None, lambda: next(audio_generator(), None)
+                                        None, lambda: next(audio_chunks, None)
                                     )
                                 except StopIteration:
                                     break

@@ -43,13 +43,16 @@ def _get_platform_info() -> str:
     if IS_WINDOWS:
         return (
             "System audio loopback should work automatically on Windows via WASAPI. "
-            "If no audio is captured, try playing audio in Zoom/Teams/Meet and "
-            "make sure your speakers/headphones are the default playback device."
+            "If no audio is captured: (1) Make sure speakers/headphones are connected, "
+            "(2) Play audio in Zoom/Teams/Meet, (3) Check Windows Sound settings — "
+            "the default playback device must be active. If WASAPI still fails, "
+            "the app will fall back to your microphone."
         )
     elif IS_MACOS:
         return (
-            "Install BlackHole: brew install blackhole-2ch "
-            "then create an Aggregate Device in Audio MIDI Setup."
+            "Install BlackHole for system audio capture: brew install blackhole-2ch "
+            "then create an Aggregate Device in Audio MIDI Setup. "
+            "Without BlackHole, the app uses your built-in mic (captures your voice, not the meeting)."
         )
     return "Install a virtual audio loopback device for your platform."
 
@@ -67,9 +70,10 @@ class AudioCaptureService:
 
     def __init__(self, device_name: Optional[str] = None):
         self.device_name = device_name
-        self.device_index: Optional[int] = None  # sounddevice index (macOS)
-        self._stream = None  # sounddevice.InputStream (macOS)
+        self.device_index: Optional[int] = None  # sounddevice index (macOS / Windows fallback)
+        self._stream = None  # sounddevice.InputStream (macOS / Windows fallback)
         self._loopback_mic = None  # speaker name for WASAPI loopback (Windows)
+        self._use_sounddevice_fallback = False  # True when using sounddevice on Windows
         self._audio_queue: queue.Queue = queue.Queue()
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -80,12 +84,47 @@ class AudioCaptureService:
     # ─────────────────────────────────────────────────────────────
 
     def find_device(self) -> Optional[int]:
-        """Find the best audio capture device. Returns a sounddevice index (macOS)
+        """Find the best audio capture device. Returns a sounddevice index (macOS/Windows fallback)
         or a non-None sentinel for Windows WASAPI loopback."""
         if IS_WINDOWS:
-            return self._find_windows_loopback()
+            result = self._find_windows_loopback()
+            if result is not None:
+                return result
+            # WASAPI failed — fall back to sounddevice (user's mic)
+            logger.warning("WASAPI loopback unavailable, falling back to sounddevice (user mic)")
+            return self._find_windows_sounddevice_fallback()
         else:
             return self._find_macos_device()
+
+    def _find_windows_sounddevice_fallback(self) -> Optional[int]:
+        """Fallback: find default input device via sounddevice on Windows."""
+        try:
+            sd = _get_sounddevice()
+            devices = sd.query_devices()
+            # Try default input first
+            default = sd.default.device[0]  # input device index
+            if default is not None and default >= 0:
+                dev = devices[default]
+                if dev["max_input_channels"] > 0:
+                    logger.warning(
+                        f"Using built-in mic on Windows: {dev['name']}. "
+                        f"This captures your voice, not system audio. "
+                        f"Ensure speakers/headphones are enabled for WASAPI loopback."
+                    )
+                    self.device_index = default
+                    self._use_sounddevice_fallback = True
+                    return default
+
+            # Any input device
+            for i, dev in enumerate(devices):
+                if dev["max_input_channels"] > 0:
+                    logger.warning(f"Using input device: {dev['name']}")
+                    self.device_index = i
+                    self._use_sounddevice_fallback = True
+                    return i
+        except Exception as e:
+            logger.error(f"sounddevice fallback failed: {e}")
+        return None
 
     def _find_windows_loopback(self) -> Optional[int]:
         """Find a WASAPI loopback-capable speaker on Windows. No install needed."""
@@ -109,8 +148,11 @@ class AudioCaptureService:
             self._loopback_mic = speaker.name
             return 0
 
+        except ImportError:
+            logger.warning("soundcard library not installed — WASAPI loopback unavailable")
+            return None
         except Exception as e:
-            logger.error(f"Failed to find WASAPI loopback device: {e}")
+            logger.warning(f"Failed to find WASAPI loopback device: {e}")
             return None
 
     def _find_macos_device(self) -> Optional[int]:
@@ -197,23 +239,39 @@ class AudioCaptureService:
             if speaker is None:
                 speaker = sc.default_speaker()
 
+            if speaker is None:
+                logger.error("No speaker found for WASAPI loopback")
+                self._running = False
+                return
+
+            logger.info(f"Opening WASAPI loopback recorder for: {speaker.name}")
             mic = speaker.loopback_recorder()
-            # Get sample rate from the loopback recorder's specs
-            sample_rate = getattr(mic, 'specs', None)
-            if sample_rate and hasattr(sample_rate, 'sample_rate'):
-                self._device_sample_rate = int(sample_rate.sample_rate)
+
+            # Get sample rate from the loopback recorder
+            specs = getattr(mic, 'specs', None)
+            if specs:
+                rate = getattr(specs, 'samplerate', None) or getattr(specs, 'sample_rate', None)
+                if rate:
+                    self._device_sample_rate = int(rate)
+                channels = getattr(specs, 'channels', None)
             else:
-                self._device_sample_rate = 44100  # default WASAPI rate
-            channels = getattr(mic, 'specs', None)
-            channel_count = channels.channels if channels and hasattr(channels, 'channels') else 2
+                self._device_sample_rate = 44100
+                channels = None
+
             logger.info(
-                f"WASAPI loopback started: {speaker.name}, "
-                f"rate={self._device_sample_rate}, channels={channel_count}"
+                f"WASAPI loopback opened: {speaker.name}, "
+                f"rate={self._device_sample_rate}, channels={channels}"
             )
 
             with mic:
+                logger.info("WASAPI loopback recording active")
                 while self._running:
-                    data = mic.record(numframes=1024)  # ~23ms at 44100Hz
+                    try:
+                        data = mic.record(numframes=1024)  # ~23ms at 44100Hz
+                    except Exception as rec_err:
+                        logger.error(f"WASAPI record error: {rec_err}")
+                        break
+
                     if data is None or len(data) == 0:
                         continue
                     # Take first channel (mono)
@@ -223,6 +281,12 @@ class AudioCaptureService:
                         data = data.copy()
                     self._audio_queue.put(data.astype(np.float32))
 
+        except ImportError:
+            logger.error(
+                "soundcard library not installed. "
+                "Install it with: pip install soundcard"
+            )
+            self._running = False
         except Exception as e:
             logger.error(f"WASAPI loopback thread error: {e}")
             self._running = False
@@ -233,6 +297,8 @@ class AudioCaptureService:
             return True
 
         if IS_WINDOWS:
+            if self._use_sounddevice_fallback:
+                return self._start_macos()  # same sounddevice path works on Windows
             return self._start_windows()
         else:
             return self._start_macos()
@@ -381,6 +447,7 @@ class AudioCaptureService:
         result = []
 
         if IS_WINDOWS:
+            # WASAPI loopback devices (via soundcard)
             try:
                 sc = _get_soundcard()
                 for s in sc.all_speakers():
@@ -388,11 +455,27 @@ class AudioCaptureService:
                         "index": 0,
                         "name": f"[WASAPI Loopback] {s.name}",
                         "channels": s.channels,
-                        "sample_rate": 0,  # determined at capture time
+                        "sample_rate": 0,
                         "type": "speaker_loopback",
                     })
             except Exception as e:
-                logger.error(f"Failed to list WASAPI speakers: {e}")
+                logger.warning(f"Could not list WASAPI speakers: {e}")
+
+            # Sounddevice input devices (fallback)
+            try:
+                sd = _get_sounddevice()
+                devices = sd.query_devices()
+                for i, dev in enumerate(devices):
+                    if dev["max_input_channels"] > 0:
+                        result.append({
+                            "index": i,
+                            "name": f"[Input] {dev['name']}",
+                            "channels": dev["max_input_channels"],
+                            "sample_rate": dev["default_samplerate"],
+                            "type": "input",
+                        })
+            except Exception as e:
+                logger.warning(f"Could not list sounddevice inputs: {e}")
         else:
             sd = _get_sounddevice()
             devices = sd.query_devices()
