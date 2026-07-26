@@ -63,6 +63,8 @@ class SessionState:
         self.capture_task: Optional[asyncio.Task] = None
         self.conversation_history: List[Dict[str, str]] = []
         self.running = False
+        self.audio_buffer: List[np.ndarray] = []
+        self.buffer_samples: int = 0
 
 
 @router.websocket("/ws/transcription/{session_id}")
@@ -79,9 +81,6 @@ async def transcription_websocket(websocket: WebSocket, session_id: str):
     session = SessionState()
     session.running = True
 
-    # Audio buffer for accumulating chunks before transcription
-    audio_buffer: list[np.ndarray] = []
-    buffer_samples = 0
     target_chunk_samples = settings.sample_rate * 3  # 3 seconds
 
     try:
@@ -126,7 +125,7 @@ async def transcription_websocket(websocket: WebSocket, session_id: str):
 
                     async def capture_and_transcribe():
                         """Background task: capture audio → transcribe → send results."""
-                        nonlocal audio_buffer, buffer_samples
+                        nonlocal target_chunk_samples
 
                         if not capture.start():
                             await websocket.send_text(json.dumps({
@@ -161,8 +160,8 @@ async def transcription_websocket(websocket: WebSocket, session_id: str):
                                 if chunk is None:
                                     continue
 
-                                audio_buffer.append(chunk)
-                                buffer_samples += len(chunk)
+                                session.audio_buffer.append(chunk)
+                                session.buffer_samples += len(chunk)
 
                                 # Send audio level
                                 level = capture.get_audio_level()
@@ -172,10 +171,10 @@ async def transcription_websocket(websocket: WebSocket, session_id: str):
                                 }))
 
                                 # Transcribe when buffer is full
-                                if buffer_samples >= target_chunk_samples:
-                                    audio_data = np.concatenate(audio_buffer)
-                                    audio_buffer = []
-                                    buffer_samples = 0
+                                if session.buffer_samples >= target_chunk_samples:
+                                    audio_data = np.concatenate(session.audio_buffer)
+                                    session.audio_buffer = []
+                                    session.buffer_samples = 0
 
                                     # Run transcription in thread pool (it's CPU-heavy)
                                     result = await loop.run_in_executor(
@@ -246,14 +245,14 @@ async def transcription_websocket(websocket: WebSocket, session_id: str):
                     audio_bytes = base64.b64decode(raw_b64)
                     audio_array = np.frombuffer(audio_bytes, dtype=np.float32)
 
-                    audio_buffer.append(audio_array)
-                    buffer_samples += len(audio_array)
+                    session.audio_buffer.append(audio_array)
+                    session.buffer_samples += len(audio_array)
 
                     # Transcribe when buffer is full
-                    if buffer_samples >= target_chunk_samples:
-                        audio_data = np.concatenate(audio_buffer)
-                        audio_buffer = []
-                        buffer_samples = 0
+                    if session.buffer_samples >= target_chunk_samples:
+                        audio_data = np.concatenate(session.audio_buffer)
+                        session.audio_buffer = []
+                        session.buffer_samples = 0
 
                         transcription = _get_transcription()
                         loop = asyncio.get_event_loop()

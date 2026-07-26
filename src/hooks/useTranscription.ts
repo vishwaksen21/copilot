@@ -2,10 +2,16 @@ import { useEffect, useRef, useCallback } from 'react'
 import { useTranscriptStore } from '../stores/transcript-store'
 
 const WS_BASE = 'ws://127.0.0.1:8000/ws'
+const RECONNECT_DELAY = 2000
+const MAX_RECONNECT_ATTEMPTS = 5
 
 // Module-level singleton: one WebSocket shared across all hook instances
 let sharedWs: WebSocket | null = null
 let sharedExpectingAnswer = false
+let sharedRecording = false
+let reconnectAttempts = 0
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+let refCount = 0
 
 export function useTranscription() {
   const {
@@ -21,18 +27,16 @@ export function useTranscription() {
     setStatus,
   } = useTranscriptStore()
 
-  const startRecording = useCallback(async () => {
-    // Don't start if already recording
+  const connectWs = useCallback((sessionId: string) => {
     if (sharedWs && sharedWs.readyState === WebSocket.OPEN) return
 
     try {
-      const sessionId = crypto.randomUUID()
-      setCurrentSessionId(sessionId)
-
       const ws = new WebSocket(`${WS_BASE}/transcription/${sessionId}`)
       sharedWs = ws
 
       ws.onopen = () => {
+        reconnectAttempts = 0
+        sharedRecording = true
         setRecording(true)
         setStatus('Connected. Starting capture...')
         ws.send(JSON.stringify({ type: 'start', mode: 'server' }))
@@ -97,8 +101,24 @@ export function useTranscription() {
 
       ws.onclose = () => {
         sharedWs = null
-        setRecording(false)
-        setStatus('Disconnected')
+        // Only show disconnected if we weren't intentionally stopped
+        if (sharedRecording) {
+          setStatus('Connection lost. Reconnecting...')
+          // Auto-reconnect with exponential backoff
+          if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+            reconnectAttempts++
+            const delay = RECONNECT_DELAY * Math.pow(2, reconnectAttempts - 1)
+            reconnectTimer = setTimeout(() => {
+              if (sharedRecording) {
+                connectWs(sessionId)
+              }
+            }, delay)
+          } else {
+            sharedRecording = false
+            setRecording(false)
+            setStatus('Connection lost. Click mic to retry.')
+          }
+        }
       }
     } catch (error) {
       console.error('Failed to start recording:', error)
@@ -106,7 +126,32 @@ export function useTranscription() {
     }
   }, [setCurrentSessionId, addSegment, setPartialText, setAiAnswer, appendAiAnswerToken, setAudioLevel, setRecording, setStatus])
 
+  const startRecording = useCallback(async () => {
+    // Don't start if already recording
+    if (sharedWs && sharedWs.readyState === WebSocket.OPEN) return
+
+    // Cancel any pending reconnect
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
+
+    reconnectAttempts = 0
+    const sessionId = crypto.randomUUID()
+    setCurrentSessionId(sessionId)
+    connectWs(sessionId)
+  }, [connectWs, setCurrentSessionId])
+
   const stopRecording = useCallback(() => {
+    // Cancel any pending reconnect
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
+
+    sharedRecording = false
+    reconnectAttempts = MAX_RECONNECT_ATTEMPTS // prevent reconnect
+
     if (sharedWs?.readyState === WebSocket.OPEN) {
       sharedWs.send(JSON.stringify({ type: 'stop' }))
       sharedWs.close()
@@ -116,18 +161,17 @@ export function useTranscription() {
     setStatus('Stopped')
   }, [setRecording, setStatus])
 
-  // Cleanup on unmount — only stop if this is the last component using the hook
+  // Ref counting — only clean up when last consumer unmounts
   useEffect(() => {
+    refCount++
     return () => {
-      // Only close if no other component will use it
-      // Since all instances share sharedWs, the last unmount cleans up
-      if (sharedWs?.readyState === WebSocket.OPEN) {
-        sharedWs.send(JSON.stringify({ type: 'stop' }))
-        sharedWs.close()
+      refCount--
+      if (refCount === 0 && sharedRecording) {
+        // Last consumer unmounted while recording — stop cleanly
+        stopRecording()
       }
-      sharedWs = null
     }
-  }, [])
+  }, [stopRecording])
 
   return {
     startRecording,

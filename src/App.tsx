@@ -27,7 +27,7 @@ function CopilotDashboard() {
 }
 
 export default function App() {
-  const isOverlay = window.location.hash === '#/overlay'
+  const isOverlay = window.location.hash.startsWith('#/overlay')
 
   if (isOverlay) {
     return (

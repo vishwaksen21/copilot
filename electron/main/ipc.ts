@@ -8,8 +8,7 @@ import {
   showAll,
   setOverlayClickThrough,
   setOverlayOpacity,
-  getStealthMode,
-  stealthMode
+  getStealthMode
 } from './window'
 import { startBackend, stopBackend } from './backend'
 
@@ -218,10 +217,19 @@ export function registerIpcHandlers(
 
   ipcMain.handle(IPC_CHANNELS.FILE_READ, async (_event, filePath: string) => {
     const fs = require('fs/promises')
+    const path = require('path')
     // Only allow reading from documents directory and app paths
     const documentsPath = app.getPath('documents')
-    const resolved = require('path').resolve(filePath)
-    if (!resolved.startsWith(documentsPath) && !resolved.startsWith(app.getPath('userData'))) {
+    const userDataPath = app.getPath('userData')
+    // Resolve symlinks to prevent traversal attacks
+    let realPath: string
+    try {
+      realPath = await fs.realpath(filePath)
+    } catch {
+      // File doesn't exist yet — resolve the parent directory instead
+      realPath = path.resolve(filePath)
+    }
+    if (!realPath.startsWith(documentsPath) && !realPath.startsWith(userDataPath)) {
       throw new Error('Access denied: path outside allowed directories')
     }
     return await fs.readFile(filePath)
@@ -231,9 +239,23 @@ export function registerIpcHandlers(
     IPC_CHANNELS.FILE_WRITE,
     async (_event, filePath: string, data: Buffer) => {
       const fs = require('fs/promises')
+      const path = require('path')
       const documentsPath = app.getPath('documents')
-      const resolved = require('path').resolve(filePath)
-      if (!resolved.startsWith(documentsPath) && !resolved.startsWith(app.getPath('userData'))) {
+      const userDataPath = app.getPath('userData')
+      let realPath: string
+      try {
+        realPath = await fs.realpath(filePath)
+      } catch {
+        // File doesn't exist yet — resolve the parent directory
+        const parentDir = path.dirname(filePath)
+        try {
+          const realParent = await fs.realpath(parentDir)
+          realPath = path.join(realParent, path.basename(filePath))
+        } catch {
+          realPath = path.resolve(filePath)
+        }
+      }
+      if (!realPath.startsWith(documentsPath) && !realPath.startsWith(userDataPath)) {
         throw new Error('Access denied: path outside allowed directories')
       }
       await fs.writeFile(filePath, data)
@@ -281,7 +303,14 @@ export function registerIpcHandlers(
   // ============================================
 
   ipcMain.handle(IPC_CHANNELS.BACKEND_GET_STATUS, () => {
-    return { running: true }
+    const http = require('http')
+    return new Promise<boolean>((resolve) => {
+      const req = http.get('http://127.0.0.1:8000/api/v1/health', (res: any) => {
+        resolve(res.statusCode === 200)
+      })
+      req.on('error', () => resolve(false))
+      req.setTimeout(2000, () => { req.destroy(); resolve(false) })
+    })
   })
 
   ipcMain.handle(IPC_CHANNELS.BACKEND_START, async () => {

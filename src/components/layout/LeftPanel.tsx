@@ -4,22 +4,80 @@ import { GlassPanel } from '../ui/GlassPanel'
 import { useTranscriptStore } from '../../stores/transcript-store'
 import { useTranscription } from '../../hooks/useTranscription'
 
+const CHAT_WS_BASE = 'ws://127.0.0.1:8000/ws/chat'
+
 export function LeftPanel() {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [input, setInput] = useState('')
+  const chatWsRef = useRef<WebSocket | null>(null)
+  const conversationIdRef = useRef(crypto.randomUUID())
 
-  const { segments, partialText, aiAnswer, isRecording } = useTranscriptStore()
+  const {
+    segments, partialText, aiAnswer, isRecording,
+    chatMessages, chatStreaming,
+    addChatMessage, setChatStreaming, appendChatStreamingToken,
+  } = useTranscriptStore()
   const { startRecording, stopRecording } = useTranscription()
+
+  // Connect chat WebSocket
+  useEffect(() => {
+    const ws = new WebSocket(`${CHAT_WS_BASE}/${conversationIdRef.current}`)
+    chatWsRef.current = ws
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        if (data.type === 'token') {
+          appendChatStreamingToken(data.content)
+        } else if (data.type === 'done') {
+          const streaming = useTranscriptStore.getState().chatStreaming
+          if (streaming) {
+            addChatMessage({
+              id: crypto.randomUUID(),
+              role: 'assistant',
+              content: streaming,
+              timestamp: Date.now(),
+            })
+          }
+          setChatStreaming('')
+        }
+      } catch (err) {
+        console.error('Failed to parse chat WS message:', err)
+      }
+    }
+
+    ws.onerror = () => console.error('Chat WebSocket error')
+    ws.onclose = () => {}
+
+    return () => { ws.close() }
+  }, [])
 
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
     }
-  }, [aiAnswer, segments, partialText])
+  }, [aiAnswer, segments, partialText, chatMessages, chatStreaming])
 
   const toggleRecording = () => {
     if (isRecording) stopRecording()
     else startRecording()
+  }
+
+  const sendChatMessage = () => {
+    const text = input.trim()
+    if (!text) return
+    if (chatWsRef.current?.readyState !== WebSocket.OPEN) return
+
+    addChatMessage({
+      id: crypto.randomUUID(),
+      role: 'user',
+      content: text,
+      timestamp: Date.now(),
+    })
+
+    chatWsRef.current.send(JSON.stringify({ type: 'message', content: text }))
+    setInput('')
+    setChatStreaming('')
   }
 
   return (
@@ -40,7 +98,7 @@ export function LeftPanel() {
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-5 space-y-4">
 
         {/* Empty state */}
-        {segments.length === 0 && !isRecording && !aiAnswer && (
+        {segments.length === 0 && !isRecording && !aiAnswer && chatMessages.length === 0 && (
           <div className="flex flex-col items-center justify-center h-full gap-4 text-center px-4">
             <div className="w-14 h-14 rounded-2xl bg-primary/10 border border-primary/20 flex items-center justify-center">
               <Mic className="w-6 h-6 text-primary/60" />
@@ -90,7 +148,7 @@ export function LeftPanel() {
           </div>
         )}
 
-        {/* AI Answer */}
+        {/* AI Answer from transcription */}
         {aiAnswer && (
           <div className="space-y-1.5 animate-fade-in">
             <div className="flex items-center gap-2">
@@ -101,6 +159,37 @@ export function LeftPanel() {
             </div>
             <div className="ml-7 px-4 py-3 rounded-2xl rounded-tl-md bg-success/[0.06] border border-success/[0.12]">
               <p className="text-sm text-white/90 leading-relaxed whitespace-pre-wrap">{aiAnswer}</p>
+            </div>
+          </div>
+        )}
+
+        {/* Chat messages */}
+        {chatMessages.map((msg) => (
+          <div key={msg.id} className="space-y-1.5 animate-fade-in">
+            <span className={`text-[10px] font-semibold uppercase tracking-wider ${
+              msg.role === 'user' ? 'text-blue-400/70' : 'text-success/70'
+            }`}>
+              {msg.role === 'user' ? 'You' : 'Avelyn'}
+            </span>
+            <div className={`px-4 py-2.5 rounded-2xl rounded-tl-md border ${
+              msg.role === 'user'
+                ? 'bg-blue-500/[0.06] border-blue-500/[0.12]'
+                : 'bg-success/[0.06] border-success/[0.12]'
+            }`}>
+              <p className="text-sm text-white/85 leading-relaxed whitespace-pre-wrap">{msg.content}</p>
+            </div>
+          </div>
+        ))}
+
+        {/* Streaming chat response */}
+        {chatStreaming && (
+          <div className="space-y-1.5 animate-fade-in">
+            <span className="text-[10px] font-semibold text-success/70 uppercase tracking-wider">Avelyn</span>
+            <div className="px-4 py-3 rounded-2xl rounded-tl-md bg-success/[0.06] border border-success/[0.12]">
+              <p className="text-sm text-white/85 leading-relaxed whitespace-pre-wrap">
+                {chatStreaming}
+                <span className="inline-block w-[2px] h-4 bg-success/50 animate-pulse ml-1 align-middle" />
+              </p>
             </div>
           </div>
         )}
@@ -127,7 +216,10 @@ export function LeftPanel() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === 'Enter' && input.trim()) setInput('')
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault()
+                sendChatMessage()
+              }
             }}
             placeholder="Ask anything..."
             className="flex-1 bg-transparent border-none text-sm text-white placeholder-white/30 focus:outline-none"
@@ -135,7 +227,7 @@ export function LeftPanel() {
 
           {input.trim() && (
             <button
-              onClick={() => setInput('')}
+              onClick={sendChatMessage}
               className="w-7 h-7 rounded-full bg-primary flex items-center justify-center shrink-0 hover:bg-primary/80 transition-colors"
             >
               <SendHorizontal className="w-3.5 h-3.5 text-white" />

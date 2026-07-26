@@ -20,19 +20,19 @@ export function registerGlobalShortcuts(
     const main = getMainWindow()
     const overlay = getOverlayWindow()
     if (isWinAlive(main) && main.isVisible()) {
-      // Enter meeting mode
-      main.hide()
+      // Enter meeting mode — use stealth functions for proper dock/taskbar handling
+      enterStealthMode(main, overlay)
       if (isWinAlive(overlay)) {
+        const { screen } = require('electron')
+        const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize
+        overlay.setSize(320, 56)
+        overlay.setPosition(sw - 320 - 24, sh - 56 - 24)
         overlay.showInactive()
         overlay.webContents.send('overlay:modeChange', 'pill')
       }
     } else {
       // Exit meeting mode
-      if (isWinAlive(overlay)) overlay.hide()
-      if (isWinAlive(main)) {
-        main.show()
-        main.focus()
-      }
+      exitStealthMode(main, overlay)
     }
   })
 

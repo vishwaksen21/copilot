@@ -22,21 +22,61 @@ import {
   Smile,
 } from 'lucide-react'
 
+const CHAT_WS_BASE = 'ws://127.0.0.1:8000/ws/chat'
+
 export default function CopilotPage() {
   const [currentPage, setCurrentPage] = useState(1)
   const [brightness, setBrightness] = useState(0.8)
   const [input, setInput] = useState('')
   const scrollRef = useRef<HTMLDivElement>(null)
+  const chatWsRef = useRef<WebSocket | null>(null)
+  const conversationIdRef = useRef(crypto.randomUUID())
 
-  const { segments, partialText, aiAnswer, audioLevel, isRecording, status } =
-    useTranscriptStore()
+  const {
+    segments, partialText, aiAnswer, audioLevel, isRecording, status,
+    chatMessages, chatStreaming,
+    addChatMessage, setChatStreaming, appendChatStreamingToken,
+  } = useTranscriptStore()
   const { startRecording, stopRecording } = useTranscription()
+
+  // Connect chat WebSocket
+  useEffect(() => {
+    const ws = new WebSocket(`${CHAT_WS_BASE}/${conversationIdRef.current}`)
+    chatWsRef.current = ws
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        if (data.type === 'token') {
+          appendChatStreamingToken(data.content)
+        } else if (data.type === 'done') {
+          const streaming = useTranscriptStore.getState().chatStreaming
+          if (streaming) {
+            addChatMessage({
+              id: crypto.randomUUID(),
+              role: 'assistant',
+              content: streaming,
+              timestamp: Date.now(),
+            })
+          }
+          setChatStreaming('')
+        }
+      } catch (err) {
+        console.error('Failed to parse chat WS message:', err)
+      }
+    }
+
+    ws.onerror = () => console.error('Chat WebSocket error')
+    ws.onclose = () => {}
+
+    return () => { ws.close() }
+  }, [])
 
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
     }
-  }, [aiAnswer, segments, partialText])
+  }, [aiAnswer, segments, partialText, chatMessages, chatStreaming])
 
   const handleNavigate = (dir: 'prev' | 'next') => {
     setCurrentPage((p) => (dir === 'prev' ? Math.max(1, p - 1) : Math.min(3, p + 1)))
@@ -45,6 +85,23 @@ export default function CopilotPage() {
   const toggleRecording = () => {
     if (isRecording) stopRecording()
     else startRecording()
+  }
+
+  const sendChatMessage = () => {
+    const text = input.trim()
+    if (!text) return
+    if (chatWsRef.current?.readyState !== WebSocket.OPEN) return
+
+    addChatMessage({
+      id: crypto.randomUUID(),
+      role: 'user',
+      content: text,
+      timestamp: Date.now(),
+    })
+
+    chatWsRef.current.send(JSON.stringify({ type: 'message', content: text }))
+    setInput('')
+    setChatStreaming('')
   }
 
   return (
@@ -165,7 +222,10 @@ export default function CopilotPage() {
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter' && input.trim()) setInput('')
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault()
+                      sendChatMessage()
+                    }
                   }}
                   placeholder="How can I help you today?"
                   className={cn(
@@ -246,9 +306,40 @@ export default function CopilotPage() {
                       />
                     ))}
                   </div>
+              </div>
+            )}
+
+            {/* Chat messages */}
+            {chatMessages.map((msg) => (
+              <div key={msg.id} className="space-y-1.5 animate-slide-up">
+                <span className={`text-[10px] font-semibold uppercase tracking-wider ${
+                  msg.role === 'user' ? 'text-blue-400/70' : 'text-success/70'
+                }`}>
+                  {msg.role === 'user' ? 'You' : 'Avelyn'}
+                </span>
+                <div className={`px-4 py-2.5 rounded-2xl rounded-tl-md border ${
+                  msg.role === 'user'
+                    ? 'bg-blue-500/[0.06] border-blue-500/[0.12]'
+                    : 'bg-success/[0.06] border-success/[0.12]'
+                }`}>
+                  <p className="text-[15px] text-foreground/85 leading-[1.7] whitespace-pre-wrap">{msg.content}</p>
                 </div>
-              )}
-            </div>
+              </div>
+            ))}
+
+            {/* Streaming chat response */}
+            {chatStreaming && (
+              <div className="space-y-1.5 animate-fade-in">
+                <span className="text-[10px] font-semibold text-success/70 uppercase tracking-wider">Avelyn</span>
+                <div className="px-5 py-4 rounded-2xl rounded-tl-md bg-success/[0.06] border border-success/[0.12]">
+                  <p className="text-[15px] text-foreground/90 leading-[1.8] whitespace-pre-wrap">
+                    {chatStreaming}
+                    <span className="inline-block w-[2px] h-4 bg-success/50 cursor-blink ml-1 align-middle" />
+                  </p>
+                </div>
+              </div>
+            )}
+          </div>
 
             {/* Meeting Controls Bar — matching demo.png */}
             <div className="px-4 py-3 border-t border-white/5 flex items-center justify-center gap-1">

@@ -32,45 +32,70 @@ export default function OverlayWindow() {
     }
   }, [segments, aiAnswer, partialText, chatMessages, chatStreaming])
 
-  // Connect chat WebSocket
+  // Connect chat WebSocket with reconnection
   useEffect(() => {
-    const ws = new WebSocket(`${CHAT_WS_BASE}/${conversationIdRef.current}`)
-    chatWsRef.current = ws
+    let ws: WebSocket | null = null
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+    let destroyed = false
 
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data)
-        if (data.type === 'token') {
-          appendChatStreamingToken(data.content)
-        } else if (data.type === 'done') {
-          const streaming = useTranscriptStore.getState().chatStreaming
-          if (streaming) {
-            addChatMessage({
-              id: crypto.randomUUID(),
-              role: 'assistant',
-              content: streaming,
-              timestamp: Date.now(),
-            })
+    const connect = () => {
+      if (destroyed) return
+      ws = new WebSocket(`${CHAT_WS_BASE}/${conversationIdRef.current}`)
+      chatWsRef.current = ws
+
+      ws.onopen = () => {
+        console.log('Chat WebSocket connected')
+      }
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data)
+          if (data.type === 'token') {
+            appendChatStreamingToken(data.content)
+          } else if (data.type === 'done') {
+            const streaming = useTranscriptStore.getState().chatStreaming
+            if (streaming) {
+              addChatMessage({
+                id: crypto.randomUUID(),
+                role: 'assistant',
+                content: streaming,
+                timestamp: Date.now(),
+              })
+            }
+            setChatStreaming('')
           }
-          setChatStreaming('')
+        } catch (err) {
+          console.error('Failed to parse chat WS message:', err)
         }
-      } catch (err) {
-        console.error('Failed to parse chat WS message:', err)
+      }
+
+      ws.onerror = () => console.error('Chat WebSocket error')
+
+      ws.onclose = () => {
+        chatWsRef.current = null
+        if (!destroyed) {
+          // Reconnect after 2 seconds
+          reconnectTimer = setTimeout(connect, 2000)
+        }
       }
     }
 
-    ws.onerror = () => console.error('Chat WebSocket error')
-    ws.onclose = () => {}
+    connect()
 
-    return () => { ws.close() }
+    return () => {
+      destroyed = true
+      if (reconnectTimer) clearTimeout(reconnectTimer)
+      if (ws && ws.readyState === WebSocket.OPEN) ws.close()
+    }
   }, [])
 
   // Listen for mode changes from main process
   useEffect(() => {
-    window.electronAPI?.overlay?.onModeChange?.((incoming) => {
+    const cleanup = window.electronAPI?.overlay?.onModeChange?.((incoming) => {
       setMode(incoming)
       if (incoming === 'pill') window.electronAPI?.overlay?.resize('pill')
     })
+    return () => cleanup?.()
   }, [])
 
   // Auto-collapse back to pill after 30s of no new content
