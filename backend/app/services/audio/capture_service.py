@@ -1,4 +1,3 @@
-import sounddevice as sd
 import numpy as np
 import threading
 import queue
@@ -14,16 +13,40 @@ TARGET_CHANNELS = 1
 CHUNK_SECONDS = 3
 CHUNK_SAMPLES = TARGET_SAMPLE_RATE * CHUNK_SECONDS
 
+# Platform detection
+IS_WINDOWS = sys.platform == "win32"
+IS_MACOS = sys.platform == "darwin"
+
+# Lazy imports — soundcard only available on Windows
+_sd = None
+_soundcard = None
+
+
+def _get_sounddevice():
+    global _sd
+    if _sd is None:
+        import sounddevice as _s
+        _sd = _s
+    return _sd
+
+
+def _get_soundcard():
+    global _soundcard
+    if _soundcard is None:
+        import soundcard as _sc
+        _soundcard = _sc
+    return _soundcard
+
 
 def _get_platform_info() -> str:
     """Return platform-specific audio device guidance."""
-    if sys.platform == "win32":
+    if IS_WINDOWS:
         return (
-            "On Windows, install VB-Audio Cable (free) from https://vb-audio.com/Cable/ "
-            "and set it as your default playback device. Then set 'Stereo Mix' or "
-            "'CABLE Output' as the input device in this app's settings."
+            "System audio loopback should work automatically on Windows via WASAPI. "
+            "If no audio is captured, try playing audio in Zoom/Teams/Meet and "
+            "make sure your speakers/headphones are the default playback device."
         )
-    elif sys.platform == "darwin":
+    elif IS_MACOS:
         return (
             "Install BlackHole: brew install blackhole-2ch "
             "then create an Aggregate Device in Audio MIDI Setup."
@@ -32,23 +55,67 @@ def _get_platform_info() -> str:
 
 
 class AudioCaptureService:
-    """Captures system audio from a virtual audio device (e.g. BlackHole).
+    """Captures system audio output — the other person's voice.
+
+    macOS: Routes through BlackHole (virtual audio device) via sounddevice.
+    Windows: Uses WASAPI loopback via soundcard (built into Windows, zero install).
 
     The idea: Zoom/Teams/Meet sends the other person's voice to the system
-    audio output. By routing that output through BlackHole, we can capture it
-    with sounddevice — without ever touching the user's microphone.
+    audio output. By capturing that output (via loopback), we get their voice
+    without ever touching the user's microphone.
     """
 
     def __init__(self, device_name: Optional[str] = None):
         self.device_name = device_name
-        self.device_index: Optional[int] = None
-        self._stream: Optional[sd.InputStream] = None
-        self._audio_queue: queue.Queue[np.ndarray] = queue.Queue()
+        self.device_index: Optional[int] = None  # sounddevice index (macOS)
+        self._stream = None  # sounddevice.InputStream (macOS)
+        self._loopback_mic = None  # speaker name for WASAPI loopback (Windows)
+        self._audio_queue: queue.Queue = queue.Queue()
         self._running = False
         self._thread: Optional[threading.Thread] = None
+        self._device_sample_rate: int = TARGET_SAMPLE_RATE
+
+    # ─────────────────────────────────────────────────────────────
+    # DEVICE DISCOVERY
+    # ─────────────────────────────────────────────────────────────
 
     def find_device(self) -> Optional[int]:
-        """Find the input device matching device_name."""
+        """Find the best audio capture device. Returns a sounddevice index (macOS)
+        or a non-None sentinel for Windows WASAPI loopback."""
+        if IS_WINDOWS:
+            return self._find_windows_loopback()
+        else:
+            return self._find_macos_device()
+
+    def _find_windows_loopback(self) -> Optional[int]:
+        """Find a WASAPI loopback-capable speaker on Windows. No install needed."""
+        try:
+            sc = _get_soundcard()
+            speakers = sc.all_speakers()
+            if not speakers:
+                logger.warning("No speakers found via soundcard (WASAPI)")
+                return None
+
+            # Prefer default speaker
+            default_speaker = sc.default_speaker()
+            if default_speaker:
+                logger.info(f"Using default speaker for WASAPI loopback: {default_speaker.name}")
+                self._loopback_mic = default_speaker.name  # store name for start()
+                return 0  # sentinel: non-None means "found"
+
+            # Fallback to first speaker
+            speaker = speakers[0]
+            logger.info(f"Using speaker for WASAPI loopback: {speaker.name}")
+            self._loopback_mic = speaker.name
+            return 0
+
+        except Exception as e:
+            logger.error(f"Failed to find WASAPI loopback device: {e}")
+            return None
+
+    def _find_macos_device(self) -> Optional[int]:
+        """Find a virtual audio device on macOS (BlackHole, etc.)."""
+        sd = _get_sounddevice()
         devices = sd.query_devices()
         keywords = [
             "blackhole", "black hole", "virtual", "loopback",
@@ -73,53 +140,123 @@ class AudioCaptureService:
                     self.device_index = i
                     return i
 
-        # Platform-aware fallback: any multi-channel input device
-        # On macOS, exclude built-in mic; on Windows, prefer Stereo Mix or multi-channel
-        exclude_names = set()
-        if platform.system() == "Darwin":
-            exclude_names = {"MacBook Pro Microphone", "MacBook Air Microphone"}
+        # Platform-aware fallback
+        exclude_names = {"MacBook Pro Microphone", "MacBook Air Microphone"}
 
         for i, dev in enumerate(devices):
             if dev["max_input_channels"] >= 1 and dev["name"] not in exclude_names:
                 dev_lower = dev["name"].lower()
-                # Prefer devices that look like they could be virtual/loopback
                 if any(kw in dev_lower for kw in ["stereo mix", "what u hear", "loopback"]):
                     logger.info(f"Using loopback device: {dev['name']} (index={i})")
                     self.device_index = i
                     return i
 
-        # Last resort: any device with 2+ channels (likely virtual)
+        # Last resort: multi-channel input
         for i, dev in enumerate(devices):
             if dev["max_input_channels"] >= 2 and dev["name"] not in exclude_names:
                 logger.info(f"Using multi-channel input device: {dev['name']} (index={i})")
                 self.device_index = i
                 return i
 
-        # If still nothing, try ANY input device (user's mic as last resort)
+        # Absolute last resort: any input device
         for i, dev in enumerate(devices):
             if dev["max_input_channels"] > 0 and dev["name"] not in exclude_names:
                 logger.warning(f"Using default input device (user mic): {dev['name']} (index={i})")
                 self.device_index = i
                 return i
 
-        logger.warning("No audio device found. Listing available input devices:")
+        logger.warning("No audio device found. Available input devices:")
         for i, dev in enumerate(devices):
             if dev["max_input_channels"] > 0:
                 logger.warning(f"  [{i}] {dev['name']} (channels={dev['max_input_channels']})")
 
         return None
 
+    # ─────────────────────────────────────────────────────────────
+    # AUDIO CAPTURE
+    # ─────────────────────────────────────────────────────────────
+
     def _audio_callback(self, indata: np.ndarray, frames: int, time_info, status):
-        """Called by sounddevice for each audio block."""
+        """Called by sounddevice for each audio block (macOS)."""
         if status:
             logger.warning(f"Audio status: {status}")
-        # Copy data (indata is reused by sounddevice)
         self._audio_queue.put(indata[:, 0].copy())
 
+    def _wasapi_loopback_thread(self, speaker_name: str):
+        """Background thread for WASAPI loopback capture on Windows."""
+        try:
+            sc = _get_soundcard()
+            speaker = None
+            for s in sc.all_speakers():
+                if s.name == speaker_name:
+                    speaker = s
+                    break
+            if speaker is None:
+                speaker = sc.default_speaker()
+
+            mic = speaker.loopback_recorder()
+            # Get sample rate from the loopback recorder's specs
+            sample_rate = getattr(mic, 'specs', None)
+            if sample_rate and hasattr(sample_rate, 'sample_rate'):
+                self._device_sample_rate = int(sample_rate.sample_rate)
+            else:
+                self._device_sample_rate = 44100  # default WASAPI rate
+            channels = getattr(mic, 'specs', None)
+            channel_count = channels.channels if channels and hasattr(channels, 'channels') else 2
+            logger.info(
+                f"WASAPI loopback started: {speaker.name}, "
+                f"rate={self._device_sample_rate}, channels={channel_count}"
+            )
+
+            with mic:
+                while self._running:
+                    data = mic.record(numframes=1024)  # ~23ms at 44100Hz
+                    if data is None or len(data) == 0:
+                        continue
+                    # Take first channel (mono)
+                    if data.ndim > 1:
+                        data = data[:, 0].copy()
+                    else:
+                        data = data.copy()
+                    self._audio_queue.put(data.astype(np.float32))
+
+        except Exception as e:
+            logger.error(f"WASAPI loopback thread error: {e}")
+            self._running = False
+
     def start(self) -> bool:
-        """Start capturing audio from the virtual device."""
+        """Start capturing audio."""
         if self._running:
             return True
+
+        if IS_WINDOWS:
+            return self._start_windows()
+        else:
+            return self._start_macos()
+
+    def _start_windows(self) -> bool:
+        """Start WASAPI loopback capture on Windows."""
+        if self._loopback_mic is None:
+            if self.find_device() is None:
+                logger.error(
+                    f"Cannot start capture: no WASAPI loopback device found. "
+                    f"{_get_platform_info()}"
+                )
+                return False
+
+        self._running = True
+        self._thread = threading.Thread(
+            target=self._wasapi_loopback_thread,
+            args=(self._loopback_mic,),
+            daemon=True,
+        )
+        self._thread.start()
+        logger.info("Windows WASAPI loopback capture started")
+        return True
+
+    def _start_macos(self) -> bool:
+        """Start sounddevice capture on macOS (BlackHole)."""
+        sd = _get_sounddevice()
 
         if self.device_index is None:
             if self.find_device() is None:
@@ -132,20 +269,20 @@ class AudioCaptureService:
         try:
             dev_info = sd.query_devices(self.device_index)
             max_channels = min(dev_info["max_input_channels"], 2)
-            device_sample_rate = int(dev_info["default_samplerate"])
+            self._device_sample_rate = int(dev_info["default_samplerate"])
 
             logger.info(
                 f"Starting capture: device={dev_info['name']}, "
-                f"channels={max_channels}, device_rate={device_sample_rate}"
+                f"channels={max_channels}, device_rate={self._device_sample_rate}"
             )
 
             self._stream = sd.InputStream(
                 device=self.device_index,
                 channels=max_channels,
-                samplerate=device_sample_rate,
+                samplerate=self._device_sample_rate,
                 dtype="float32",
                 callback=self._audio_callback,
-                blocksize=int(device_sample_rate * 0.1),  # 100ms blocks
+                blocksize=int(self._device_sample_rate * 0.1),
             )
             self._stream.start()
             self._running = True
@@ -160,6 +297,8 @@ class AudioCaptureService:
     def stop(self):
         """Stop capturing audio."""
         self._running = False
+
+        # macOS: stop sounddevice stream
         if self._stream:
             try:
                 self._stream.stop()
@@ -167,6 +306,12 @@ class AudioCaptureService:
             except Exception:
                 pass
             self._stream = None
+
+        # Windows: wait for thread to exit
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+            self._thread = None
+
         # Drain the queue
         while not self._audio_queue.empty():
             try:
@@ -175,11 +320,12 @@ class AudioCaptureService:
                 break
         logger.info("Audio capture stopped")
 
-    def chunks(self, target_rate: int = TARGET_SAMPLE_RATE) -> Generator[np.ndarray, None, None]:
-        """Yield audio chunks of CHUNK_SAMPLES samples at the target sample rate.
+    # ─────────────────────────────────────────────────────────────
+    # AUDIO CHUNKS + RESAMPLING
+    # ─────────────────────────────────────────────────────────────
 
-        Resamples from the device's native rate if needed.
-        """
+    def chunks(self, target_rate: int = TARGET_SAMPLE_RATE) -> Generator[np.ndarray, None, None]:
+        """Yield audio chunks of CHUNK_SAMPLES samples at the target sample rate."""
         buffer: list[np.ndarray] = []
         total_samples = 0
 
@@ -190,9 +336,8 @@ class AudioCaptureService:
                 continue
 
             # Resample if device rate differs from target
-            device_rate = int(sd.query_devices(self.device_index)["default_samplerate"])
+            device_rate = self._device_sample_rate
             if device_rate != target_rate:
-                # Simple linear interpolation resampling
                 ratio = target_rate / device_rate
                 new_length = int(len(chunk) * ratio)
                 indices = np.linspace(0, len(chunk) - 1, new_length)
@@ -203,9 +348,7 @@ class AudioCaptureService:
 
             if total_samples >= CHUNK_SAMPLES:
                 audio = np.concatenate(buffer)
-                # Trim to exact chunk size
                 yield audio[:CHUNK_SAMPLES]
-                # Keep remainder
                 remainder = audio[CHUNK_SAMPLES:]
                 if len(remainder) > 0:
                     buffer = [remainder]
@@ -217,7 +360,7 @@ class AudioCaptureService:
         # Flush remaining audio
         if buffer:
             audio = np.concatenate(buffer)
-            if len(audio) > TARGET_SAMPLE_RATE:  # At least 1 second
+            if len(audio) > TARGET_SAMPLE_RATE:
                 yield audio
 
     def get_audio_level(self) -> float:
@@ -225,21 +368,39 @@ class AudioCaptureService:
         try:
             chunk = self._audio_queue.get_nowait()
             rms = float(np.sqrt(np.mean(chunk ** 2)))
-            return min(rms * 10, 1.0)  # Scale up for visibility
+            return min(rms * 10, 1.0)
         except queue.Empty:
             return 0.0
 
     @staticmethod
     def list_audio_devices() -> list[dict]:
-        """List all available input audio devices."""
-        devices = sd.query_devices()
+        """List all available audio devices."""
         result = []
-        for i, dev in enumerate(devices):
-            if dev["max_input_channels"] > 0:
-                result.append({
-                    "index": i,
-                    "name": dev["name"],
-                    "channels": dev["max_input_channels"],
-                    "sample_rate": dev["default_samplerate"],
-                })
+
+        if IS_WINDOWS:
+            try:
+                sc = _get_soundcard()
+                for s in sc.all_speakers():
+                    result.append({
+                        "index": 0,
+                        "name": f"[WASAPI Loopback] {s.name}",
+                        "channels": s.channels,
+                        "sample_rate": 0,  # determined at capture time
+                        "type": "speaker_loopback",
+                    })
+            except Exception as e:
+                logger.error(f"Failed to list WASAPI speakers: {e}")
+        else:
+            sd = _get_sounddevice()
+            devices = sd.query_devices()
+            for i, dev in enumerate(devices):
+                if dev["max_input_channels"] > 0:
+                    result.append({
+                        "index": i,
+                        "name": dev["name"],
+                        "channels": dev["max_input_channels"],
+                        "sample_rate": dev["default_samplerate"],
+                        "type": "input",
+                    })
+
         return result
